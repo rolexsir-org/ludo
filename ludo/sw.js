@@ -1,8 +1,8 @@
-/* Ludora — service worker
+/* Ludora Pro — service worker
    Precache the full app shell (tiny payload), serve cache-first with a
    background refresh, and swap in new versions safely via SKIP_WAITING. */
 'use strict';
-var VERSION = 'ludora-v1.1.0';
+var VERSION = 'ludora-v1.2.0';
 var PRECACHE = [
   './',
   './index.html',
@@ -17,6 +17,7 @@ var PRECACHE = [
   './js/net.js',
   './js/mp.js',
   './js/qr.js',
+  './js/ads.js',
   './js/game.js',
   './js/ui.js',
   './js/main.js',

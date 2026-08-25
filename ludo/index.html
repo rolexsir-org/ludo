@@ -4,15 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <meta name="theme-color" content="#0B0C10">
-<meta name="description" content="Ludora — a fast, premium Ludo board game. Play offline vs smart AI or pass & play with friends.">
-<title>Ludora · Ludo</title>
+<meta name="description" content="Ludora Pro — Premium mobile-first Ludo. Play offline vs smart AI, pass & play with friends, and complete daily challenges.">
+<title>Ludora · Premium Ludo</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Ludora">
+<meta name="apple-mobile-web-app-title" content="Ludora Pro">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -50,6 +50,8 @@
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4.5 6.5h15M9.5 6V4.5h5V6M6.5 6.5l1 13.5h9l1-13.5M10 10v6.5M14 10v6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-share" viewBox="0 0 24 24"><path d="M12 3.5v10m0-10L8.2 7.3M12 3.5l3.8 3.8M7 12H5.8A2.3 2.3 0 0 0 3.5 14.3v3.9A2.3 2.3 0 0 0 5.8 20.5h12.4a2.3 2.3 0 0 0 2.3-2.3v-3.9A2.3 2.3 0 0 0 18.2 12H17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
     <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.2 5 6v6c0 4.4 3 7.6 7 8.8 4-1.2 7-4.4 7-8.8V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m8.8 12 2.2 2.2 4.2-4.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.2 6.8L21 12l-6.8 2.2L12 21l-2.2-6.8L3 12l6.8-2.2z" fill="currentColor"/></symbol>
+    <symbol id="i-gift" viewBox="0 0 24 24"><rect x="3.5" y="8" width="17" height="12.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v12.5M3.5 12h17M12 8H8.5a2.5 2.5 0 0 1 0-5c2.5 0 3.5 5 3.5 5zm0 0h3.5a2.5 2.5 0 0 0 0-5c-2.5 0-3.5 5-3.5 5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
   </defs>
 </svg>
 
@@ -63,6 +65,7 @@
     <div id="boardWrap">
       <canvas id="board" aria-label="Ludo board"></canvas>
       <button id="handoffBanner" class="hidden" aria-label="Pass device"></button>
+      <div id="tutorialOverlay" class="hidden"></div>
     </div>
     <div id="diceDock">
       <div id="netChip" class="hidden" role="status" aria-label="Connection status"></div>
@@ -102,6 +105,7 @@
 <script src="js/net.js" defer></script>
 <script src="js/mp.js" defer></script>
 <script src="js/qr.js" defer></script>
+<script src="js/ads.js" defer></script>
 <script src="js/game.js" defer></script>
 <script src="js/ui.js" defer></script>
 <script src="js/main.js" defer></script>

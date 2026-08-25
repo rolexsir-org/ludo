@@ -21,7 +21,7 @@ html = html.replace(/<link rel="(icon|apple-touch-icon)"[^>]*>\n?/g, '');
 const scripts = [
   'js/engine.js', 'js/ai.js', 'js/persist.js', 'js/store.js', 'js/profile.js',
   'js/audio.js', 'js/board.js', 'js/net.js', 'js/mp.js', 'js/qr.js',
-  'js/game.js', 'js/ui.js', 'js/main.js'
+  'js/ads.js', 'js/game.js', 'js/ui.js', 'js/main.js'
 ];
 for (const s of scripts) {
   const code = await read(s);
@@ -29,8 +29,8 @@ for (const s of scripts) {
     '<script>\n' + code + '\n</script>');
 }
 
-html = html.replace('<title>Ludora · Ludo</title>',
-  '<title>Ludora · Ludo (single-file build)</title>');
+html = html.replace('<title>Ludora · Premium Ludo</title>',
+  '<title>Ludora · Premium Ludo (single-file build)</title>');
 
 await writeFile('ludora.html', html);
 console.log('wrote ludora.html —', (html.length / 1024).toFixed(1), 'KB');
