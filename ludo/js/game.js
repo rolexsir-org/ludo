@@ -1,17 +1,18 @@
 /* =========================================================================
    Ludora — game.js
-   Match controller: turn flow, dice, animation pipeline, AI scheduling,
-   pass & play handoff, autosave/resume. Optimized for instant feel:
-   ROLL → MOVE → RESULT → NEXT with no dead time.
+   Match controller: turn flow, fair crypto RNG dice, animation pipeline,
+   squash & stretch physics, AI scheduling, pass & play handoff,
+   and bulletproof autosave/resume.
+   Optimized for 60 FPS mobile-first responsiveness with zero dead time.
    ========================================================================= */
 (function (global) {
   'use strict';
   var E = global.LudoraEngine, Board = global.LudoraBoard, AI = global.LudoraAI,
       Audio2 = global.LudoraAudio, Store = global.LudoraStore;
 
-  var G = null; // active match instance
+  var G = null; // Active match instance
 
-  /* ---------- fair dice: crypto randomness, rejection sampled ---------- */
+  /* Fair dice: cryptographic randomness with rejection sampling */
   function rollValue() {
     try {
       var a = new Uint8Array(1);
@@ -19,29 +20,39 @@
         crypto.getRandomValues(a);
         if (a[0] < 252) return (a[0] % 6) + 1;
       }
-    } catch (e) { return 1 + Math.floor(Math.random() * 6); }
+    } catch (e) {
+      return 1 + Math.floor(Math.random() * 6);
+    }
   }
 
   function Match() {
-    this.st = null;           // engine state
-    this.cfg = null;          // {mode, seats, theme, dice, tokenShape, youColor, dailyKey}
-    this.canvas = null; this.ctx = null; this.staticCv = null;
-    this.m = null; this.dpr = 1; this.cssS = 0;
+    this.st = null;           // Engine state
+    this.cfg = null;          // {mode, seats, theme, dice, tokenShape, youColor, dailyKey, tutorial}
+    this.canvas = null;
+    this.ctx = null;
+    this.staticCv = null;
+    this.m = null;
+    this.dpr = 1;
+    this.cssS = 0;
     this.view = { anims: [], particles: [], halos: [], targets: [] };
-    this.legal = [];          // current legal moves (when awaiting human choice)
-    this.running = false; this.raf = 0; this.lastFrame = 0;
-    this.timers = []; this.destroyed = false;
+    this.legal = [];          // Current legal moves
+    this.running = false;
+    this.raf = 0;
+    this.lastFrame = 0;
+    this.timers = [];
+    this.destroyed = false;
     this.lastHumanSeat = -1;
     this.awaitingHandoff = false;
     this.diceBusy = false;
-    this.speed = 1;           // anim speed multiplier
-    /* network play */
-    this.netHost = null;      // Room (authoritative host)
-    this.netGuest = null;     // Guest controller (render-only replica)
+    this.speed = 1;
+    this.netHost = null;
+    this.netGuest = null;
     this.netSeq = 0;
     this._idleFrame = false;
-    this._drawList = [];      // reused buffer — no per-frame allocation
+    this._drawList = [];
     this.reducedMotion = false;
+    this.tutorialStep = 0;
+
     try {
       this.reducedMotion = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)').matches;
     } catch (e) {}
@@ -51,15 +62,21 @@
   Match.prototype.start = function (canvas, cfg, savedState) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
-    this.cfg = cfg;
+    this.cfg = cfg || {};
     if (savedState) {
       this.st = savedState;
       this.migrateResume();
     } else {
       this.st = E.createGame({ mode: cfg.mode, seats: cfg.seats, rules: cfg.rules });
     }
-    var settings = (global.LudoraProfile && LudoraProfile.loadProfile().settings) || {};
+
+    var settings = (global.LudoraProfile && global.LudoraProfile.loadProfile().settings) || {};
     this.speed = settings.animSpeed === 'fast' ? 1 : 1.35;
+    if (this.reducedMotion || settings.reducedMotion) {
+      this.reducedMotion = true;
+      this.speed = 0.5;
+    }
+
     this.lastBegun = -1;
     this.arrivalPt = null;
     this._loopBound = this.loop.bind(this);
@@ -69,16 +86,21 @@
     this.running = true;
     this.pendingBegin = true;
     this.raf = requestAnimationFrame(this._loopBound);
+
+    if (this.cfg.tutorial) {
+      this.tutorialStep = 1;
+    }
   };
 
   Match.prototype.observeBoard = function () {
     if (this.ro || typeof ResizeObserver === 'undefined') return;
     var self = this;
-    this.ro = new ResizeObserver(function () { if (!self.destroyed) self.resize(); });
+    this.ro = new ResizeObserver(function () {
+      if (!self.destroyed) self.resize();
+    });
     this.ro.observe(this.canvas.parentElement);
   };
 
-  /* Called by the UI after event handlers are attached. */
   Match.prototype.begin = function () {
     if (!this.pendingBegin || this.destroyed) return;
     this.pendingBegin = false;
@@ -89,26 +111,30 @@
   Match.prototype.migrateResume = function () {
     if (this.st.phase === 'move') {
       this.legal = E.legalMoves(this.st, this.st.lastRoll || 0);
-      if (!this.legal.length) { this.st.phase = 'roll'; this.st.lastRoll = null; }
+      if (!this.legal.length) {
+        this.st.phase = 'roll';
+        this.st.lastRoll = null;
+      }
     }
   };
 
-  /* ---------- layout ---------- */
+  /* Layout & Hi-DPI Scaling */
   Match.prototype.resize = function (force) {
     this.wake();
     var wrap = this.canvas.parentElement;
     var availW, availH;
     if (wrap && wrap.clientWidth > 0 && wrap.clientHeight > 0) {
-      availW = wrap.clientWidth - 18;
-      availH = wrap.clientHeight - 10;
+      availW = wrap.clientWidth - 16;
+      availH = wrap.clientHeight - 8;
     } else {
-      /* layout not ready yet (early frame / hidden tab): sane fallback */
       var iw = global.innerWidth || 360, ih = global.innerHeight || 640;
-      availW = Math.min(iw - 40, ih - 220);
+      availW = Math.min(iw - 32, ih - 210);
       availH = availW;
     }
+
     var S = Math.max(200, Math.floor(Math.min(availW, availH)));
-    if (!force && S === this.cssS && this.m) return;   // nothing to do
+    if (!force && S === this.cssS && this.m) return;
+
     this.cssS = S;
     this.dpr = Math.min(global.devicePixelRatio || 1, 2.5);
     this.canvas.style.width = S + 'px';
@@ -118,6 +144,7 @@
     this.m = Board.metrics(S);
     this.rebuildStatic();
   };
+
   Match.prototype.rebuildStatic = function () {
     var cv = this.staticCv = this.staticCv || document.createElement('canvas');
     cv.width = Math.round(this.cssS * this.dpr);
@@ -127,7 +154,6 @@
     Board.drawStatic(c, this.m, this.cfg.theme || 'ivory');
   };
 
-  /* ---------- helpers ---------- */
   Match.prototype.after = function (ms, fn) {
     var self = this;
     var id = setTimeout(function () {
@@ -138,28 +164,37 @@
     this.timers.push(id);
     return id;
   };
+
   Match.prototype.clearTimers = function () {
     this.timers.forEach(clearTimeout);
     this.timers.length = 0;
   };
+
   Match.prototype.save = function () {
-    if (this.st.phase === 'over') { Store.remove(Store.keys.match); return; }
-    if (this.cfg.mode === 'online') return;   // host-authoritative: never resume online matches locally
-    if (this.st.phase === 'anim') return; // keep the last stable save point
+    if (this.st.phase === 'over') {
+      Store.remove(Store.keys.match);
+      return;
+    }
+    if (this.cfg.mode === 'online' || this.cfg.tutorial) return;
+    if (this.st.phase === 'anim') return;
     Store.save(Store.keys.match, {
-      v: 1, savedAt: Date.now(),
+      v: 1,
+      savedAt: Date.now(),
       cfg: this.cfg,
       st: this.st
     });
   };
 
-  /* ---------- turn flow ---------- */
+  /* Turn Flow */
   Match.prototype.enterTurn = function (first) {
     if (this.destroyed || this.st.phase === 'over') return;
     this.wake();
     var seat = this.st.turn;
     var seatInfo = this.st.seats[seat];
-    if (seat !== this.lastBegun) { E.beginsTurn(this.st); this.lastBegun = seat; }
+    if (seat !== this.lastBegun) {
+      E.beginsTurn(this.st);
+      this.lastBegun = seat;
+    }
     this.legal = [];
     this.view.halos = [];
     this.view.targets = [];
@@ -167,7 +202,10 @@
     this.emit('turn', { seat: seat, seatInfo: seatInfo });
 
     var needsHandoff = this.needsHandoff(seat);
-    if (this.pauseRequested) { this.freezeNow(); return; }
+    if (this.pauseRequested) {
+      this.freezeNow();
+      return;
+    }
     if (needsHandoff) {
       this.awaitingHandoff = true;
       this.emit('handoff', { seat: seat, seatInfo: seatInfo });
@@ -184,14 +222,15 @@
   };
 
   Match.prototype.needsHandoff = function (seat) {
-    if (this.cfg.mode === 'online') return false;
+    if (this.cfg.mode === 'online' || this.cfg.tutorial) return false;
     if (this.st.seats.length < 2) return false;
     var humans = this.st.seats.filter(function (s) { return s.kind === 'human'; }).length;
-    if (humans < 2) return false; // single human device player: no ceremony
+    if (humans < 2) return false;
     var s = this.st.seats[seat];
     if (s.kind !== 'human') return false;
     return seat !== this.lastHumanSeat;
   };
+
   Match.prototype.ackHandoff = function () {
     if (!this.awaitingHandoff) return;
     this.awaitingHandoff = false;
@@ -203,8 +242,8 @@
     if (this.destroyed || this.st.phase === 'over' || this.paused) return;
     var seat = this.st.turn, s = this.st.seats[seat];
     var self = this;
+
     if (this.netGuest) {
-      /* guests are snapshot-driven; only their own turn arms the dice */
       if (this.isLocalSeat(seat) && s.kind === 'human') {
         this.emit('dice', { state: 'ready' });
         this.announce('Your turn — tap to roll');
@@ -213,6 +252,7 @@
       }
       return;
     }
+
     if (s.kind === 'human') {
       if (this.seatIsRemote(seat)) {
         if (this.netHost && this.netHost.isSeatLive(seat)) {
@@ -220,19 +260,22 @@
           this.announce('Waiting for ' + s.name);
           return;
         }
-        /* disconnected remote player: keep the game visibly moving */
         this.emit('dice', { state: 'remote-wait' });
         this.emit('toast', { text: s.name + ' is disconnected — turn skipped', kind: 'info' });
         this.announce(s.name + ' is disconnected, turn skipped');
-        this.after(1100, function () { self.endTurnFlow(false); });
+        this.after(1000, function () { self.endTurnFlow(false); });
         return;
       }
       this.lastHumanSeat = seat;
       this.emit('dice', { state: 'ready' });
       this.announce(this.st.moveNo === 0 ? 'Your turn — tap to roll' : 'Your turn');
+
+      if (this.cfg.tutorial) {
+        this.emit('tutorial', { step: 1, text: 'Tap the dice to roll!' });
+      }
     } else {
       this.emit('dice', { state: 'ai-wait' });
-      this.after(360 + Math.random() * 320, this.doRoll.bind(this));
+      this.after(AI.thinkDelay(s.ai), this.doRoll.bind(this));
     }
   };
 
@@ -241,53 +284,85 @@
     this.wake();
     this.diceBusy = true;
     this.legal = [];
-    var value = rollValue();
+
+    var value;
+    if (this.cfg.tutorial) {
+      var seq = [6, 4, 6, 2, 6, 5, 1];
+      value = seq[(this.st.moveNo) % seq.length] || 6;
+    } else {
+      value = rollValue();
+    }
+
     var r = E.registerRoll(this.st, value);
     this.emit('dice', { state: 'rolling', value: value });
-    Audio2.play('roll'); Audio2.haptic('roll');
+    Audio2.play('roll');
+    Audio2.haptic('roll');
+
     var self = this;
     this.after(430, function () {
-      if (self.destroyed || self.st.phase === 'over') return;   // match ended mid-roll
+      if (self.destroyed || self.st.phase === 'over') return;
       self.diceBusy = false;
-      Audio2.play('land', value); Audio2.haptic('land');
+      Audio2.play('land', value);
+      Audio2.haptic('land');
       self.announce(self.st.seats[self.st.turn].name + ' rolled ' + value);
+
       if (r.forfeit) {
         self.emit('toast', { text: 'Three sixes — turn passes', kind: 'info' });
         self.announce('Three sixes — turn passes');
-        Audio2.play('noMove'); Audio2.haptic('noMove');
+        Audio2.play('noMove');
+        Audio2.haptic('noMove');
         self.netSyncHost('rolled', { value: value, outcome: 'forfeit', seat: self.st.turn });
-        self.after(560, function () { self.endTurnFlow(false); });
+        self.after(520, function () { self.endTurnFlow(false); });
         return;
       }
-      if (value === 6) { Audio2.play('six'); Audio2.haptic('six'); }
+
+      if (value === 6) {
+        Audio2.play('six');
+        Audio2.haptic('six');
+      }
+
       self.legal = E.legalMoves(self.st, value);
       self.st.phase = 'move';
       self.save();
+
       if (!self.legal.length) {
         self.emit('toast', { text: 'No moves for ' + self.st.seats[self.st.turn].name, kind: 'info' });
         self.announce('No moves for ' + self.st.seats[self.st.turn].name);
-        Audio2.play('noMove'); Audio2.haptic('noMove');
+        Audio2.play('noMove');
+        Audio2.haptic('noMove');
         self.netSyncHost('rolled', { value: value, outcome: 'nomoves', seat: self.st.turn });
-        self.after(600, function () { self.endTurnFlow(value === 6); });
+        self.after(560, function () { self.endTurnFlow(value === 6); });
         return;
       }
+
       var seat = self.st.turn, s = self.st.seats[seat];
+      var firstLegal = self.legal[0];
       if (self.legal.length === 1) {
-        self.view.halos = [self.legal[0].token];
+        self.view.halos = [firstLegal.token];
         self.emit('hud');
         self.netSyncHost('rolled', { value: value, outcome: 'auto', seat: seat });
-        self.after(200, function () { self.executeMove(self.legal[0]); });
+        if (self.cfg.tutorial) {
+          self.emit('tutorial', { step: 2, text: 'You rolled a ' + value + '! Tap your glowing token to move.' });
+        }
+        self.after(200, function () {
+          if (self.st && self.st.phase === 'move') self.executeMove(firstLegal);
+        });
       } else if (s.kind === 'ai') {
         self.emit('hud', { thinking: true });
         self.netSyncHost('rolled', { value: value, outcome: 'auto', seat: seat });
         self.after(AI.thinkDelay(s.ai), function () {
-          self.executeMove(AI.chooseMove(self.st, seat, value, s.ai));
+          if (self.st && self.st.phase === 'move') {
+            self.executeMove(AI.chooseMove(self.st, seat, value, s.ai));
+          }
         });
       } else {
         self.view.halos = self.legal.map(function (mv) { return mv.token; });
         self.view.targets = self.legal.map(function (mv) { return mv; });
         self.emit('dice', { state: 'done', value: value });
         self.emit('hud');
+        if (self.cfg.tutorial) {
+          self.emit('tutorial', { step: 3, text: 'Choose which token to move.' });
+        }
         var mine = self.isLocalSeat(seat);
         self.netSyncHost('rolled', { value: value, outcome: mine ? 'choose' : 'auto', seat: seat });
       }
@@ -295,40 +370,51 @@
   };
 
   Match.prototype.executeMove = function (move) {
-    if (this.destroyed) return;
+    if (this.destroyed || !move || !this.st || (this.st.phase !== 'move' && !this.netGuest)) return;
     this.wake();
     if (this.netGuest) {
-      /* guests never mutate state: forward the request, host will echo it back */
       if (this.st.phase === 'move' && this.isLocalSeat(this.st.turn) && move && isToken(move.token)) {
         this.netGuest.requestMove(move.token);
-        this.view.halos = []; this.view.targets = [];
+        this.view.halos = [];
+        this.view.targets = [];
       }
       return;
     }
-    this.view.halos = []; this.view.targets = [];
+    this.view.halos = [];
+    this.view.targets = [];
     this.st.phase = 'anim';
     this.arrivalPt = null;
     this.emit('hud');
     var seat = this.st.turn;
-    var events = E.applyMove(this.st, move); // engine commits instantly; visuals follow
+    var events = E.applyMove(this.st, move);
+
     this.netSyncHost('moved', {
       seat: seat,
       move: { token: move.token, from: move.from, to: move.to },
-      captures: events.captures, home: events.home, win: events.win,
+      captures: events.captures,
+      home: events.home,
+      win: events.win,
       extra: (this.st.lastRoll === 6) || events.captures.length > 0 || events.home
     });
+
     this.animateMove(seat, move, events);
   };
-  function isToken(v) { return typeof v === 'number' && v >= 0 && v <= 3 && Math.floor(v) === v; }
+
+  function isToken(v) {
+    return typeof v === 'number' && v >= 0 && v <= 3 && Math.floor(v) === v;
+  }
 
   Match.prototype.endTurnFlow = function (extra) {
     if (this.destroyed) return;
-    if (this.st.phase === 'over') { this.finish(); return; }
+    if (this.st.phase === 'over') {
+      this.finish();
+      return;
+    }
     E.endTurn(this.st, extra);
     this.save();
     this.emit('hud');
     this.netSyncHost('turn', { seat: this.st.turn, extra: !!extra });
-    this.after(110, this.enterTurn.bind(this));
+    this.after(100, this.enterTurn.bind(this));
   };
 
   Match.prototype.finish = function () {
@@ -337,11 +423,15 @@
     this.announce(this.st.seats[this.st.winner] ? this.st.seats[this.st.winner].name + ' wins the match' : 'Match over');
     this.netSyncHost('end', { winner: this.st.winner, rankings: this.st.rankings });
     Store.remove(Store.keys.match);
+
     var st = this.st, cfg = this.cfg;
     var youSeat = this.findYouSeat();
     var maxAi = 0;
-    st.seats.forEach(function (s) { if (s.kind === 'ai') maxAi = Math.max(maxAi, s.ai); });
+    st.seats.forEach(function (s) {
+      if (s.kind === 'ai') maxAi = Math.max(maxAi, s.ai != null ? s.ai : 0);
+    });
     var durationS = Math.max(1, Math.round((Date.now() - st.startedAt) / 1000));
+
     this.emit('end', {
       winner: st.winner,
       rankings: st.rankings,
@@ -353,7 +443,8 @@
       youSeat: youSeat,
       maxAiLevel: maxAi,
       durationS: durationS,
-      moveNo: st.moveNo
+      moveNo: st.moveNo,
+      tutorial: !!cfg.tutorial
     });
   };
 
@@ -368,42 +459,77 @@
     return idx;
   };
 
-  /* ---------- animation ---------- */
+  /* Move Animation & Landing Squash Physics */
   Match.prototype.animateMove = function (seat, move, events) {
     var self = this;
     var path = events.path;
     var fromPt = this.tokenPoint(seat, move.token, move.from);
     var pts = [fromPt].concat(path.map(function (p) { return self.posPoint(seat, move.token, p); }));
     var per = this.speed > 1.2 ? 92 : 66;
+
     var anim = {
-      kind: 'hop', seat: seat, token: move.token, pts: pts,
-      t0: performance.now(), dur: Math.max(120, per * (pts.length - 1)), i: 0
+      kind: 'hop',
+      seat: seat,
+      token: move.token,
+      pts: pts,
+      t0: performance.now(),
+      dur: Math.max(120, per * (pts.length - 1)),
+      i: 0
     };
+
     this.view.anims.push(anim);
     var delay = anim.dur + 90;
+
     this.after(delay, function () {
-      if (self.destroyed || self.st.phase === 'over') { if (!events.win) return; }
+      if (self.destroyed || self.st.phase === 'over') {
+        if (!events.win) return;
+      }
       var wait = 0;
+
+      Audio2.play('landing');
+      Audio2.haptic('landing');
+
       if (events.captures.length) {
         var at = self.arrivalPt || pts[pts.length - 1];
         events.captures.forEach(function (cap) {
           self.view.particles.push({
-            kind: 'burst', x: at.x, y: at.y, t0: performance.now(), dur: 520,
+            kind: 'burst',
+            x: at.x,
+            y: at.y,
+            t0: performance.now(),
+            dur: 520,
             color: self.st.seats[cap.seat].color
           });
         });
-        Audio2.play('capture'); Audio2.haptic('capture');
-        self.emit('toast', { text: self.st.seats[seat].name + ' captured ' + self.st.seats[events.captures[0].seat].name, kind: 'capture' });
+        Audio2.play('capture');
+        Audio2.haptic('capture');
+        self.emit('toast', {
+          text: self.st.seats[seat].name + ' captured ' + self.st.seats[events.captures[0].seat].name,
+          kind: 'capture'
+        });
         wait = 340;
       }
+
       if (events.home) {
         var ctr = Board.homeSlots(self.m, self.st.seats[seat].color)[0];
-        self.view.particles.push({ kind: 'ripple', x: ctr.x, y: ctr.y, r0: self.m.cell * 0.5, t0: performance.now(), dur: 600 });
-        Audio2.play('home'); Audio2.haptic('home');
+        self.view.particles.push({
+          kind: 'ripple',
+          x: ctr.x,
+          y: ctr.y,
+          r0: self.m.cell * 0.5,
+          t0: performance.now(),
+          dur: 600
+        });
+        Audio2.play('home');
+        Audio2.haptic('home');
         wait = Math.max(wait, 300);
       }
+
       self.after(wait, function () {
-        if (events.win) { self.finishWin(); return; }
+        if (events.win) {
+          self.finishWin();
+          return;
+        }
         var extra = (self.st.lastRoll === 6) || events.captures.length > 0 || events.home;
         self.emit('dice', { state: 'idle' });
         self.endTurnFlow(extra);
@@ -413,43 +539,48 @@
 
   Match.prototype.finishWin = function () {
     var self = this;
-    Audio2.play('win'); Audio2.haptic('win');
-    this.after(700, function () { self.finish(); });
+    Audio2.play('win');
+    Audio2.haptic('win');
+    this.after(650, function () { self.finish(); });
   };
 
-  /* token position helpers */
   Match.prototype.homeOrder = function (seat, token) {
     var order = 0;
-    for (var t = 0; t < token; t++) if (this.st.tokens[seat][t] === E.HOME) order++;
+    for (var t = 0; t < token; t++) {
+      if (this.st.tokens[seat][t] === E.HOME) order++;
+    }
     return order;
   };
+
   Match.prototype.posPoint = function (seat, token, pos) {
     var color = this.st.seats[seat].color;
     var ho = pos === E.HOME ? this.homeOrder(seat, token) : null;
     var p = Board.pointForPos(this.m, color, pos, token, ho);
     return { x: p.x, y: p.y + this.m.cell * 0.16 };
   };
-  Match.prototype.tokenPoint = function (seat, token, posOverride, isFrom) {
+
+  Match.prototype.tokenPoint = function (seat, token, posOverride) {
     var pos = posOverride != null ? posOverride : this.st.tokens[seat][token];
     return this.posPoint(seat, token, pos);
   };
 
-  /* ---------- rendering ---------- */
+  /* 60 FPS Render Loop */
   Match.prototype.loop = function (ts) {
     if (!this.running || this.destroyed) return;
     this.raf = requestAnimationFrame(this._loopBound);
     var now = typeof ts === 'number' ? ts : performance.now();
-    if (!this.m) { this.resize(); if (!this.m) return; }
+    if (!this.m) {
+      this.resize();
+      if (!this.m) return;
+    }
 
-    /* Frame budgeting: when nothing animates (no hops, particles or a
-       local player decision to pulse), draw one settled frame and stop
-       painting — the loop ticks at ~zero cost until activity resumes. */
     var st = this.st;
     var deciding = st.phase !== 'over' && st.phase !== 'anim' &&
                    st.seats[st.turn].kind === 'human' && this.isLocalSeat(st.turn);
     var needsWork = this.view.anims.length > 0 || this.view.particles.length > 0 ||
                     (this.view.halos.length > 0 && st.phase === 'move') ||
                     (deciding && !this.reducedMotion);
+
     if (!needsWork && this._idleFrame) return;
     this._idleFrame = !needsWork;
 
@@ -465,24 +596,25 @@
       Board.drawYardGlow(ctx, this.m, st.seats[st.turn].color, t);
     }
 
-    /* destination targets + halos for human choice */
     if (st.phase === 'move' && this.view.halos.length) {
       var self2 = this;
       this.view.targets.forEach(function (mv) {
         var cr = E.posToCell(st.seats[st.turn].color, mv.to);
-        if (cr) Board.drawTarget(ctx, self2.m, cr, t);
-        else if (mv.to === E.HOME) {           // exact home entry: mark the center
+        if (cr) {
+          Board.drawTarget(ctx, self2.m, cr, t);
+        } else if (mv.to === E.HOME) {
           var ctr = Board.homeSlots(self2.m, st.seats[st.turn].color)[0];
           Board.drawRipple(ctx, ctr.x, ctr.y, self2.m.cell * 0.5, 0.5 + 0.4 * Math.sin(t * 5));
         }
       });
     }
 
-    /* tokens: static placement with stacking */
+    /* Token Stacking & Sorting */
     var drawList = this._drawList;
     drawList.length = 0;
     var groups = {};
     var seatIdx, tk;
+
     for (seatIdx = 0; seatIdx < st.seats.length; seatIdx++) {
       for (tk = 0; tk < 4; tk++) {
         if (this.animFor(seatIdx, tk)) continue;
@@ -495,6 +627,7 @@
         (groups[key] = groups[key] || []).push({ seat: seatIdx, token: tk, pt: pt, pos: pos });
       }
     }
+
     var cell = this.m.cell;
     var match = this;
     Object.keys(groups).forEach(function (k) {
@@ -503,8 +636,10 @@
       var sameSeat = g.every(function (e) { return e.seat === g[0].seat; });
       g.forEach(function (e, i) {
         var off = { x: 0, y: 0 }, scale = 1;
-        if (n === 2) { off = { x: (i === 0 ? -0.14 : 0.14) * cell, y: -0.05 * cell }; scale = 0.95; }
-        else if (n >= 3) {
+        if (n === 2) {
+          off = { x: (i === 0 ? -0.14 : 0.14) * cell, y: -0.05 * cell };
+          scale = 0.95;
+        } else if (n >= 3) {
           var r = Math.floor(i / 2), c = i % 2;
           off = { x: (c - 0.5) * 0.34 * cell, y: (r - (n > 3 ? 0.5 : 0)) * 0.28 * cell };
           scale = n >= 4 ? 0.78 : 0.85;
@@ -512,7 +647,11 @@
         var isHome = e.pos === E.HOME;
         if (isHome) scale *= 0.52;
         drawList.push({
-          x: e.pt.x + off.x, y: e.pt.y + off.y, seat: e.seat, token: e.token, scale: scale,
+          x: e.pt.x + off.x,
+          y: e.pt.y + off.y,
+          seat: e.seat,
+          token: e.token,
+          scale: scale,
           halo: match.view.halos.indexOf(e.token) >= 0 && e.seat === st.turn && st.phase === 'move'
         });
         if (sameSeat && n >= 2 && i === 0) {
@@ -528,11 +667,12 @@
       if (d.halo) Board.drawHalo(ctx, d.x, d.y, cell * 0.42, t, colorIdx);
       Board.drawToken(ctx, d.x, d.y, cell * 0.42, colorIdx, match.tokenShape(), { scale: d.scale, lift: lift });
     });
+
     drawList.filter(function (d) { return d.badge; }).forEach(function (d) {
       Board.drawCountBadge(ctx, d.x, d.y, d.n, cell);
     });
 
-    /* movers */
+    /* Active Hopping Movers with Squash & Stretch */
     var self = this;
     this.view.anims = this.view.anims.filter(function (a) {
       var u = (now - a.t0) / a.dur;
@@ -543,15 +683,33 @@
       var p0 = a.pts[i], p1 = a.pts[i + 1];
       var hop = Math.sin(Math.PI * f);
       var x = p0.x + (p1.x - p0.x) * f;
-      var y = p0.y + (p1.y - p0.y) * f - hop * cell * 0.5;
+      var y = p0.y + (p1.y - p0.y) * f - (self.reducedMotion ? 0 : hop * cell * 0.52);
       var colorIdx = st.seats[a.seat].color;
-      if (a.i !== i) { a.i = i; Audio2.play('step', i); }
-      Board.drawToken(ctx, x, y, cell * 0.46, colorIdx, self.tokenShape(), { lift: 0.25 + hop * 0.5, scale: 1.02 });
+
+      // Squash and stretch at landing
+      var squashX = 1.0, squashY = 1.0;
+      if (hop < 0.15 && !self.reducedMotion) {
+        var sq = (0.15 - hop) / 0.15;
+        squashX = 1.0 + sq * 0.12;
+        squashY = 1.0 - sq * 0.10;
+      }
+
+      if (a.i !== i) {
+        a.i = i;
+        Audio2.play('step', i);
+      }
+
+      Board.drawToken(ctx, x, y, cell * 0.46, colorIdx, self.tokenShape(), {
+        lift: self.reducedMotion ? 0 : (0.22 + hop * 0.55),
+        scale: 1.02,
+        squashX: squashX,
+        squashY: squashY
+      });
       self.arrivalPt = { x: a.pts[a.pts.length - 1].x, y: a.pts[a.pts.length - 1].y };
       return true;
     });
 
-    /* particles */
+    /* Particle Explosions & Shockwaves */
     this.view.particles = this.view.particles.filter(function (p) {
       var u = (now - p.t0) / p.dur;
       if (u >= 1) return false;
@@ -560,8 +718,6 @@
       return true;
     });
   };
-  function self2cell(self2) { return self2.m.cell; }
-  function self2m(c) { return c; }
 
   Match.prototype.wake = function () { this._idleFrame = false; };
   Match.prototype.animFor = function (seat, token) {
@@ -573,7 +729,7 @@
   };
   Match.prototype.tokenShape = function () { return this.cfg.tokenShape || 'classic'; };
 
-  /* ---------- network helpers ---------- */
+  /* Network Synchronization Helpers */
   Match.prototype.isLocalSeat = function (seatIdx) {
     if (seatIdx == null || !this.st) return false;
     if (this.cfg.mode === 'online') {
@@ -581,44 +737,43 @@
     }
     return true;
   };
+
   Match.prototype.seatIsRemote = function (seatIdx) {
     if (this.cfg.mode !== 'online' || !this.st) return false;
     var color = this.st.seats[seatIdx].color;
     var meta = this.cfg.seats.filter(function (x) { return x.color === color; })[0];
     return !!(meta && meta.remote);
   };
-  Match.prototype.announce = function (text) { this.emit('announce', { text: text }); };
 
-  /* host: forward a validated guest roll request into the normal pipeline */
+  Match.prototype.announce = function (text) {
+    this.emit('announce', { text: text });
+  };
+
   Match.prototype.netGuestRoll = function (seatIdx) {
     if (this.destroyed || !this.netHost) return;
     if (this.st.phase !== 'roll' || this.diceBusy) return;
     this.doRoll();
   };
-  /* host: apply a validated guest move through the same pipeline as local moves */
+
   Match.prototype.netGuestMove = function (seatIdx, move) {
     if (this.destroyed || !this.netHost) return;
     if (this.st.phase !== 'move') return;
     this.executeMove(move);
   };
+
   Match.prototype.netSyncHost = function (tag, fx) {
     if (this.netHost) this.netHost.sync(tag, fx);
   };
-  /* host: a disconnected remote seat that owed a roll/move must not
-     deadlock the match — skip their turn once detected */
+
   Match.prototype.netAdvanceDisconnected = function (seatIdx) {
     if (this.destroyed || !this.netHost || this.st.phase === 'over') return;
     if (this.st.turn !== seatIdx || !this.seatIsRemote(seatIdx)) return;
     if (this.netHost.isSeatLive(seatIdx)) return;
-    if (this.st.phase !== 'roll' && this.st.phase !== 'move') return;   // let animations settle
+    if (this.st.phase !== 'roll' && this.st.phase !== 'move') return;
     this.announce(this.st.seats[seatIdx].name + ' skipped — disconnected');
     this.endTurnFlow(false);
   };
 
-  /* ---------- guest: apply an authoritative snapshot ----------
-     Guests never run engine transitions. They swap in the validated state
-     and replay the host's fx through the same visual pipeline the host
-     used, so every device shows the same game. */
   Match.prototype.netApply = function (snap) {
     if (this.destroyed || !snap || !this.netGuest) return;
     this.wake();
@@ -631,19 +786,23 @@
       this.st = st;
       this.legal = st.phase === 'move' ? E.legalMoves(st, st.lastRoll) : [];
       this.emit('dice', { state: 'rolling', value: fx.value });
-      Audio2.play('roll'); Audio2.haptic('roll');
-      this.after(430, function () {
-        Audio2.play('land', fx.value); Audio2.haptic('land');
+      Audio2.play('roll');
+      Audio2.haptic('roll');
+      this.after(400, function () {
+        Audio2.play('land', fx.value);
+        Audio2.haptic('land');
         self.announce(st.seats[st.turn].name + ' rolled ' + fx.value);
         if (fx.value === 6) { Audio2.play('six'); Audio2.haptic('six'); }
         if (fx.outcome === 'forfeit') {
           self.emit('toast', { text: 'Three sixes — turn passes', kind: 'info' });
-          Audio2.play('noMove'); Audio2.haptic('noMove');
+          Audio2.play('noMove');
+          Audio2.haptic('noMove');
           return;
         }
         if (fx.outcome === 'nomoves') {
           self.emit('toast', { text: 'No moves for ' + st.seats[st.turn].name, kind: 'info' });
-          Audio2.play('noMove'); Audio2.haptic('noMove');
+          Audio2.play('noMove');
+          Audio2.haptic('noMove');
           return;
         }
         if (fx.outcome === 'choose' && self.isLocalSeat(st.turn)) {
@@ -662,8 +821,12 @@
       this.st = st;
       var move = fx.move || { token: 0, from: 0, to: 0 };
       var events = {
-        seat: fx.seat, move: move, path: E.pathPositions(move.from, move.to),
-        captures: fx.captures || [], home: !!fx.home, win: !!fx.win
+        seat: fx.seat,
+        move: move,
+        path: E.pathPositions(move.from, move.to),
+        captures: fx.captures || [],
+        home: !!fx.home,
+        win: !!fx.win
       };
       this.st.phase = 'anim';
       this.animateMoveVisual(fx.seat, move, events);
@@ -673,7 +836,8 @@
     if (snap.tag === 'turn') {
       this.st = st;
       this.legal = [];
-      this.view.halos = []; this.view.targets = [];
+      this.view.halos = [];
+      this.view.targets = [];
       this.emit('hud');
       this.emit('turn', { seat: st.turn, seatInfo: st.seats[st.turn] });
       this.armRoll();
@@ -687,35 +851,52 @@
     }
   };
 
-  /* visual-only move replay (no engine calls, no turn advancement) */
   Match.prototype.animateMoveVisual = function (seat, move, events) {
     var self = this;
     var fromPt = this.tokenPoint(seat, move.token, move.from);
     var pts = [fromPt].concat(events.path.map(function (p) { return self.posPoint(seat, move.token, p); }));
     var per = this.speed > 1.2 ? 92 : 66;
-    var anim = { kind: 'hop', seat: seat, token: move.token, pts: pts,
-                 t0: performance.now(), dur: Math.max(120, per * (pts.length - 1)), i: 0 };
+    var anim = {
+      kind: 'hop',
+      seat: seat,
+      token: move.token,
+      pts: pts,
+      t0: performance.now(),
+      dur: Math.max(120, per * (pts.length - 1)),
+      i: 0
+    };
     this.view.anims.push(anim);
     this.arrivalPt = null;
+
     this.after(anim.dur + 90, function () {
       var wait = 0;
+      Audio2.play('landing');
+      Audio2.haptic('landing');
+
       if (events.captures.length) {
         var at = self.arrivalPt || pts[pts.length - 1];
         events.captures.forEach(function (cap) {
           self.view.particles.push({
-            kind: 'burst', x: at.x, y: at.y, t0: performance.now(), dur: 520,
+            kind: 'burst',
+            x: at.x,
+            y: at.y,
+            t0: performance.now(),
+            dur: 520,
             color: self.st.seats[cap.seat].color
           });
         });
-        Audio2.play('capture'); Audio2.haptic('capture');
+        Audio2.play('capture');
+        Audio2.haptic('capture');
         self.emit('toast', { text: self.st.seats[seat].name + ' captured ' + self.st.seats[events.captures[0].seat].name, kind: 'capture' });
         self.announce(self.st.seats[seat].name + ' captured ' + self.st.seats[events.captures[0].seat].name);
         wait = 340;
       }
+
       if (events.home) {
         var ctr = Board.homeSlots(self.m, self.st.seats[seat].color)[0];
         self.view.particles.push({ kind: 'ripple', x: ctr.x, y: ctr.y, r0: self.m.cell * 0.5, t0: performance.now(), dur: 600 });
-        Audio2.play('home'); Audio2.haptic('home');
+        Audio2.play('home');
+        Audio2.haptic('home');
         self.announce(self.st.seats[seat].name + ' brought a token home');
         wait = Math.max(wait, 300);
       }
@@ -723,10 +904,10 @@
     });
   };
 
-  /* ---------- input ---------- */
+  /* Input Handling */
   Match.prototype.hitTest = function (px, py) {
     if (this.st.phase !== 'move' || this.st.seats[this.st.turn].kind !== 'human' || !this.legal.length) return null;
-    var cell = this.m.cell, best = null, bestD = cell * 0.75;
+    var cell = this.m.cell, best = null, bestD = cell * 0.78;
     var self = this;
     var cand = {};
     this.legal.forEach(function (mv) { cand[mv.token] = mv; });
@@ -744,7 +925,10 @@
     var rect = this.canvas.getBoundingClientRect();
     var x = ev.clientX - rect.left, y = ev.clientY - rect.top;
     var mv = this.hitTest(x, y);
-    if (mv) { Audio2.play('tap'); this.executeMove(mv); }
+    if (mv) {
+      Audio2.play('tap');
+      this.executeMove(mv);
+    }
   };
 
   Match.prototype.rollRequest = function () {
@@ -758,37 +942,39 @@
     this.doRoll();
   };
 
-  Match.prototype.diceForSelection = function (n) { // keyboard 1..4
+  Match.prototype.diceForSelection = function (n) {
     if (this.st.phase !== 'move' || this.st.seats[this.st.turn].kind !== 'human') return;
     var mv = this.legal.filter(function (m) { return m.token === n - 1; })[0];
     if (mv) this.executeMove(mv);
   };
 
-  /* ---------- lifecycle ---------- */
+  /* Lifecycle & State Preservation */
   Match.prototype.pause = function () {
     if (this.destroyed || this.paused) return;
     var st = this.st;
     var waitingDice = st.phase === 'roll' && st.seats[st.turn].kind === 'human';
     var choosing = st.phase === 'move' && st.seats[st.turn].kind === 'human';
     if (waitingDice || choosing || this.awaitingHandoff) {
-      /* stable point: safe to freeze outright */
       this.clearTimers();
       this.view.anims = [];
       this.freezeNow();
     } else {
-      /* AI turn or animation in flight: let it settle, then freeze */
       this.pauseRequested = true;
     }
   };
+
   Match.prototype.resumePaused = function () {
-    if (this.destroyed || !this.paused) { this.pauseRequested = false; return; }
+    if (this.destroyed || !this.paused) {
+      this.pauseRequested = false;
+      return;
+    }
     this.paused = false;
     this.pauseRequested = false;
     this.running = true;
     this.diceBusy = false;
     this.loop(performance.now());
     var st = this.st;
-    if (this.awaitingHandoff) return;           // overlay still up until acked
+    if (this.awaitingHandoff) return;
     if (st.phase === 'move' && st.seats[st.turn].kind === 'human') {
       this.representMovePhase();
       this.emit('dice', { state: 'done', value: st.lastRoll });
@@ -799,15 +985,26 @@
       this.armRoll();
     }
   };
+
   Match.prototype.representMovePhase = function () {
     var self = this;
     this.legal = E.legalMoves(this.st, this.st.lastRoll);
-    if (!this.legal.length) { this.st.phase = 'roll'; this.st.lastRoll = null; this.armRoll(); return; }
+    if (!this.legal.length) {
+      this.st.phase = 'roll';
+      this.st.lastRoll = null;
+      this.armRoll();
+      return;
+    }
     if (this.legal.length === 1) {
-      this.after(220, function () { self.executeMove(self.legal[0]); });
+      var singleMove = this.legal[0];
+      this.after(220, function () {
+        if (self.st && self.st.phase === 'move') self.executeMove(singleMove);
+      });
     } else if (this.st.seats[this.st.turn].kind === 'ai') {
       this.after(AI.thinkDelay(this.st.seats[this.st.turn].ai), function () {
-        self.executeMove(AI.chooseMove(self.st, self.st.turn, self.st.lastRoll, self.st.seats[self.st.turn].ai));
+        if (self.st && self.st.phase === 'move') {
+          self.executeMove(AI.chooseMove(self.st, self.st.turn, self.st.lastRoll, self.st.seats[self.st.turn].ai));
+        }
       });
     } else {
       this.view.halos = this.legal.map(function (mv) { return mv.token; });
@@ -829,20 +1026,28 @@
     this.running = false;
     this.clearTimers();
     cancelAnimationFrame(this.raf);
-    if (this.ro) { try { this.ro.disconnect(); } catch (e) {} this.ro = null; }
+    if (this.ro) {
+      try { this.ro.disconnect(); } catch (e) {}
+      this.ro = null;
+    }
   };
 
-  /* ---------- module API ---------- */
+  /* Module API */
   var Game = {
     active: function () { return G; },
-    _Match: Match,   /* exposed for headless multiplayer tests */
+    _Match: Match,
     start: function (canvas, cfg, savedState) {
       if (G) G.destroy();
       G = new Match();
       G.start(canvas, cfg, savedState);
       return G;
     },
-    destroy: function () { if (G) { G.destroy(); G = null; } },
+    destroy: function () {
+      if (G) {
+        G.destroy();
+        G = null;
+      }
+    },
     saved: function () {
       var pkt = Store.load(Store.keys.match, function (o) {
         if (!o || o.v !== 1 || !o.cfg || !o.st) return false;
@@ -851,5 +1056,6 @@
       return pkt;
     }
   };
+
   global.LudoraGame = Game;
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -78,7 +78,7 @@ function advance(ms) {
 
 /* load scripts */
 global.window = window;
-for (const mod of ['engine', 'ai', 'persist', 'store', 'profile', 'audio', 'board', 'net', 'mp', 'qr', 'game']) {
+for (const mod of ['engine', 'ai', 'persist', 'store', 'profile', 'audio', 'board', 'net', 'mp', 'qr', 'ads', 'game']) {
   const code = fs.readFileSync(path.join(__dirname, '..', 'js', mod + '.js'), 'utf8');
   window.eval(code);
 }
