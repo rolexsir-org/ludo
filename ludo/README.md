@@ -1,4 +1,4 @@
-# Ludo X  — Premium Ludo PWA
+# Ludo Pro  — Premium Ludo PWA
 
 A complete, competition-level Ludo game delivered as a web app. Built from
 scratch: no frameworks, no CDNs, no external fonts, no backend. Everything —
